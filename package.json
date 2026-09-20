@@ -1,0 +1,10 @@
+{
+  "name": "audio-listening-site",
+  "private": true,
+  "scripts": {
+    "dev:web": "npm --prefix web run dev",
+    "dev:worker": "npm --prefix worker run dev",
+    "build:web": "npm --prefix web run build",
+    "deploy:worker": "npm --prefix worker run deploy"
+  }
+}

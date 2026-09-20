@@ -1,0 +1,20 @@
+{
+  "name": "audio-listening-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply audio-listening --local",
+    "db:migrate:remote": "wrangler d1 migrations apply audio-listening --remote"
+  },
+  "dependencies": {
+    "hono": "^4.9.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250920.1",
+    "typescript": "^5.9.2",
+    "wrangler": "^4.37.0"
+  }
+}

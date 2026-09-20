@@ -1,0 +1,31 @@
+name = "audio-listening"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# D1 + R2 use remote=true so local `wrangler dev` reads your real bucket/DB.
+# Durable Objects always run locally (cannot use wrangler dev --remote with DOs).
+
+[[d1_databases]]
+binding = "DB"
+database_name = "audio-listening"
+database_id = "ef5271f4-ecf0-465f-ad2b-f4389cde9028"
+migrations_dir = "migrations"
+remote = true
+
+[[r2_buckets]]
+binding = "AUDIO"
+bucket_name = "watchparty-movies"
+remote = true
+
+[durable_objects]
+bindings = [
+  { name = "ROOM", class_name = "ListeningRoom" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ListeningRoom"]
+
+[vars]
+CORS_ORIGIN = "http://localhost:3000"
+LIBRARY_PREFIX = "AudioBooks/"
