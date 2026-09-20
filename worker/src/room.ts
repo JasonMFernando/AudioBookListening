@@ -118,6 +118,19 @@ export class ListeningRoom implements DurableObject {
       return;
     }
 
+    if (data.type === "leave") {
+      // Drop this socket from presence immediately, then close.
+      this.revision += 1;
+      await this.persistMeta();
+      this.broadcastExcept(ws);
+      try {
+        ws.close(1000, "left");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
     if (data.type === "heartbeat") {
       // Keep-alive only — do not overwrite shared playback from followers.
       return;
@@ -148,18 +161,25 @@ export class ListeningRoom implements DurableObject {
     }
   }
 
-  async webSocketClose(ws: WebSocket) {
+  async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean) {
     this.revision += 1;
     await this.persistMeta();
-    this.broadcastAll();
-    if (this.state.getWebSockets().length === 0) {
+    // The closing socket can still appear in getWebSockets() — exclude it.
+    this.broadcastExcept(ws);
+    const remaining = this.state
+      .getWebSockets()
+      .filter((socket) => socket !== ws);
+    if (remaining.length === 0) {
       await this.flushPositionToD1();
     }
   }
 
   async webSocketError(ws: WebSocket) {
+    this.revision += 1;
+    await this.persistMeta();
+    this.broadcastExcept(ws);
     try {
-      ws.close();
+      ws.close(1011, "error");
     } catch {
       // ignore
     }
@@ -170,13 +190,16 @@ export class ListeningRoom implements DurableObject {
     await this.flushPositionToD1();
   }
 
-  private listeners(): string[] {
-    return this.state.getWebSockets().map((socket) => {
-      const attachment = socket.deserializeAttachment() as
-        | SessionAttachment
-        | null;
-      return attachment?.name?.trim() || "Guest";
-    });
+  private listeners(exclude?: WebSocket): string[] {
+    return this.state
+      .getWebSockets()
+      .filter((socket) => socket !== exclude)
+      .map((socket) => {
+        const attachment = socket.deserializeAttachment() as
+          | SessionAttachment
+          | null;
+        return attachment?.name?.trim() || "Guest";
+      });
   }
 
   private livePosition(): number {
@@ -185,14 +208,14 @@ export class ListeningRoom implements DurableObject {
     return this.playback.position + Math.max(0, elapsed);
   }
 
-  private statePayload(you: string | null): ServerMessage {
+  private statePayload(you: string | null, exclude?: WebSocket): ServerMessage {
     return {
       type: "state",
       position: this.livePosition(),
       isPlaying: this.playback.isPlaying,
       updatedAt: this.playback.updatedAt,
       revision: this.revision,
-      listeners: this.listeners(),
+      listeners: this.listeners(exclude),
       you: you ?? "",
     };
   }
@@ -210,6 +233,15 @@ export class ListeningRoom implements DurableObject {
       const attachment = ws.deserializeAttachment() as SessionAttachment | null;
       const you = attachment?.name || "";
       this.send(ws, this.statePayload(you));
+    }
+  }
+
+  private broadcastExcept(exclude: WebSocket) {
+    for (const ws of this.state.getWebSockets()) {
+      if (ws === exclude) continue;
+      const attachment = ws.deserializeAttachment() as SessionAttachment | null;
+      const you = attachment?.name || "";
+      this.send(ws, this.statePayload(you, exclude));
     }
   }
 

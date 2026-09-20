@@ -39,6 +39,7 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
   const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const ignoreEchoUntil = useRef(0);
+  const intentionalClose = useRef(false);
 
   const send = useCallback((payload: Record<string, unknown>) => {
     const ws = wsRef.current;
@@ -51,12 +52,31 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
     ignoreEchoUntil.current = Date.now() + LOCAL_ECHO_MS;
   }, []);
 
+  const leave = useCallback(() => {
+    intentionalClose.current = true;
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ type: "leave" }));
+      } catch {
+        // ignore
+      }
+      try {
+        ws.close(1000, "left");
+      } catch {
+        // ignore
+      }
+    }
+    wsRef.current = null;
+  }, []);
+
   useEffect(() => {
     if (!enabled || !code || !name) return;
 
     let closed = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let attempt = 0;
+    intentionalClose.current = false;
 
     const connect = () => {
       const ws = new WebSocket(wsUrl(code, name));
@@ -82,7 +102,6 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
           return;
         }
         if (msg.type === "state") {
-          // Right after we send a control, skip playhead overwrite from our own echo.
           const suppressPlayhead = Date.now() < ignoreEchoUntil.current;
 
           setState((prev) => ({
@@ -98,7 +117,7 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
 
       ws.onclose = () => {
         setState((s) => ({ ...s, connected: false }));
-        if (!closed) {
+        if (!closed && !intentionalClose.current) {
           attempt += 1;
           const delay = Math.min(8000, 500 * 2 ** Math.min(attempt, 4));
           retryTimer = setTimeout(connect, delay);
@@ -106,7 +125,9 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
       };
 
       ws.onerror = () => {
-        setError("Realtime connection error — retrying…");
+        if (!intentionalClose.current) {
+          setError("Realtime connection error — retrying…");
+        }
       };
     };
 
@@ -114,8 +135,21 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
 
     return () => {
       closed = true;
+      intentionalClose.current = true;
       if (retryTimer) clearTimeout(retryTimer);
-      wsRef.current?.close();
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: "leave" }));
+        } catch {
+          // ignore
+        }
+        try {
+          ws.close(1000, "left");
+        } catch {
+          // ignore
+        }
+      }
       wsRef.current = null;
     };
   }, [code, name, enabled]);
@@ -176,5 +210,6 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
     pause,
     seek,
     heartbeat,
+    leave,
   };
 }

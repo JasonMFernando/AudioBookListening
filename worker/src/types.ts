@@ -47,6 +47,7 @@ export type SessionAttachment = {
 
 export type ClientMessage =
   | { type: "join"; name: string }
+  | { type: "leave" }
   | { type: "play"; position: number }
   | { type: "pause"; position: number }
   | { type: "seek"; position: number; isPlaying: boolean }
