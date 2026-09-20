@@ -7,6 +7,7 @@ export type SyncState = {
   position: number;
   isPlaying: boolean;
   updatedAt: number;
+  revision: number;
   listeners: string[];
   connected: boolean;
 };
@@ -17,25 +18,27 @@ type ServerMessage =
       position: number;
       isPlaying: boolean;
       updatedAt: number;
+      revision: number;
       listeners: string[];
       you: string;
     }
   | { type: "error"; message: string };
 
-const LOCAL_IGNORE_MS = 1500;
+/** Brief window where we don't re-apply our own echoed state as "remote". */
+const LOCAL_ECHO_MS = 300;
 
 export function useRoomSync(code: string, name: string, enabled: boolean) {
   const [state, setState] = useState<SyncState>({
     position: 0,
     isPlaying: false,
     updatedAt: Date.now(),
+    revision: 0,
     listeners: [],
     connected: false,
   });
   const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const ignoreUntil = useRef(0);
-  const lastRemoteUpdatedAt = useRef(0);
+  const ignoreEchoUntil = useRef(0);
 
   const send = useCallback((payload: Record<string, unknown>) => {
     const ws = wsRef.current;
@@ -45,7 +48,7 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
   }, []);
 
   const markLocalControl = useCallback(() => {
-    ignoreUntil.current = Date.now() + LOCAL_IGNORE_MS;
+    ignoreEchoUntil.current = Date.now() + LOCAL_ECHO_MS;
   }, []);
 
   useEffect(() => {
@@ -53,6 +56,7 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
 
     let closed = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let attempt = 0;
 
     const connect = () => {
       const ws = new WebSocket(wsUrl(code, name));
@@ -60,6 +64,7 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
 
       ws.onopen = () => {
         if (closed) return;
+        attempt = 0;
         setState((s) => ({ ...s, connected: true }));
         setError(null);
         ws.send(JSON.stringify({ type: "join", name }));
@@ -77,36 +82,31 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
           return;
         }
         if (msg.type === "state") {
-          // Ignore echoes while we are driving playback locally.
-          if (Date.now() < ignoreUntil.current) {
-            setState((s) => ({
-              ...s,
-              listeners: msg.listeners,
-              connected: true,
-            }));
-            return;
-          }
+          // Right after we send a control, skip playhead overwrite from our own echo.
+          const suppressPlayhead = Date.now() < ignoreEchoUntil.current;
 
-          lastRemoteUpdatedAt.current = msg.updatedAt;
-          setState({
-            position: msg.position,
-            isPlaying: msg.isPlaying,
-            updatedAt: msg.updatedAt,
+          setState((prev) => ({
+            position: suppressPlayhead ? prev.position : msg.position,
+            isPlaying: suppressPlayhead ? prev.isPlaying : msg.isPlaying,
+            updatedAt: suppressPlayhead ? prev.updatedAt : msg.updatedAt,
+            revision: msg.revision,
             listeners: msg.listeners,
             connected: true,
-          });
+          }));
         }
       };
 
       ws.onclose = () => {
         setState((s) => ({ ...s, connected: false }));
         if (!closed) {
-          retryTimer = setTimeout(connect, 1500);
+          attempt += 1;
+          const delay = Math.min(8000, 500 * 2 ** Math.min(attempt, 4));
+          retryTimer = setTimeout(connect, delay);
         }
       };
 
       ws.onerror = () => {
-        setError("Realtime connection error");
+        setError("Realtime connection error — retrying…");
       };
     };
 
@@ -164,7 +164,6 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
 
   const heartbeat = useCallback(
     (position: number, isPlaying: boolean) => {
-      // Soft presence only — does not fight the local playhead.
       send({ type: "heartbeat", position, isPlaying });
     },
     [send],
@@ -177,6 +176,5 @@ export function useRoomSync(code: string, name: string, enabled: boolean) {
     pause,
     seek,
     heartbeat,
-    lastRemoteUpdatedAt,
   };
 }

@@ -27,12 +27,11 @@ export function AudioPlayer({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const applyingRemote = useRef(false);
   const seeded = useRef(false);
-  const lastAppliedRemoteAt = useRef(0);
+  const lastAppliedRevision = useRef(0);
   const [current, setCurrent] = useState(initialPosition);
   const [duration, setDuration] = useState(0);
   const lastSaved = useRef(0);
 
-  // Seed once from saved room position — do not re-apply on every render.
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !hasAudio || seeded.current) return;
@@ -43,35 +42,42 @@ export function AudioPlayer({
     seeded.current = true;
   }, [hasAudio, initialPosition]);
 
-  // Apply remote sync only when a NEW server state arrives (updatedAt changes),
-  // never on every local timeupdate re-render (that caused the snap-back loop).
+  // Apply remote playback whenever the room revision advances.
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !hasAudio) return;
 
-    const remoteAt = sync.state.updatedAt;
-    if (!remoteAt || remoteAt === lastAppliedRemoteAt.current) return;
-    lastAppliedRemoteAt.current = remoteAt;
+    const revision = sync.state.revision;
+    if (!revision || revision === lastAppliedRevision.current) return;
+    lastAppliedRevision.current = revision;
 
     const target = sync.state.position;
     const drift = Math.abs(audio.currentTime - target);
 
     applyingRemote.current = true;
-    if (drift > 1.5) {
-      audio.currentTime = target;
+    if (drift > 0.75) {
+      try {
+        audio.currentTime = target;
+      } catch {
+        // ignore seek errors while metadata loading
+      }
       setCurrent(target);
     }
-    if (sync.state.isPlaying && audio.paused) {
-      void audio.play().catch(() => undefined);
-    } else if (!sync.state.isPlaying && !audio.paused) {
+
+    if (sync.state.isPlaying) {
+      if (audio.paused) {
+        void audio.play().catch(() => undefined);
+      }
+    } else if (!audio.paused) {
       audio.pause();
     }
+
     window.setTimeout(() => {
       applyingRemote.current = false;
-    }, 250);
+    }, 350);
   }, [
     hasAudio,
-    sync.state.updatedAt,
+    sync.state.revision,
     sync.state.position,
     sync.state.isPlaying,
   ]);
@@ -81,7 +87,7 @@ export function AudioPlayer({
       const audio = audioRef.current;
       if (!audio || audio.paused) return;
       sync.heartbeat(audio.currentTime, true);
-    }, 10000);
+    }, 20000);
     return () => clearInterval(id);
   }, [sync]);
 
@@ -90,7 +96,10 @@ export function AudioPlayer({
     if (!audio) return;
     const next = Math.max(
       0,
-      Math.min(audio.duration || Number.POSITIVE_INFINITY, audio.currentTime + delta),
+      Math.min(
+        audio.duration || Number.POSITIVE_INFINITY,
+        audio.currentTime + delta,
+      ),
     );
     applyingRemote.current = true;
     audio.currentTime = next;
@@ -98,13 +107,13 @@ export function AudioPlayer({
     sync.seek(next, !audio.paused);
     window.setTimeout(() => {
       applyingRemote.current = false;
-    }, 250);
+    }, 350);
   }
 
   if (!hasAudio) {
     return (
       <div className="player-empty">
-        <p>Upload an .m4b file to start listening together.</p>
+        <p>No audio linked to this room.</p>
       </div>
     );
   }
@@ -114,7 +123,7 @@ export function AudioPlayer({
       <audio
         ref={audioRef}
         src={audioUrlForRoom(code)}
-        preload="metadata"
+        preload="auto"
         onLoadedMetadata={(e) => {
           const el = e.currentTarget;
           setDuration(el.duration || 0);
@@ -171,7 +180,7 @@ export function AudioPlayer({
           sync.seek(next, !audio.paused);
           window.setTimeout(() => {
             applyingRemote.current = false;
-          }, 250);
+          }, 350);
         }}
       />
 

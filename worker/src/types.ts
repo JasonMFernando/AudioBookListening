@@ -41,6 +41,10 @@ export type PlaybackState = {
   updatedAt: number;
 };
 
+export type SessionAttachment = {
+  name: string;
+};
+
 export type ClientMessage =
   | { type: "join"; name: string }
   | { type: "play"; position: number }
@@ -54,6 +58,7 @@ export type ServerMessage =
       position: number;
       isPlaying: boolean;
       updatedAt: number;
+      revision: number;
       listeners: string[];
       you: string;
     }

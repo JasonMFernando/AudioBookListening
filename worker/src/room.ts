@@ -1,20 +1,26 @@
-import type { ClientMessage, Env, PlaybackState, ServerMessage } from "./types";
-
-type Session = {
-  name: string;
-  quit: boolean;
-};
+import type {
+  ClientMessage,
+  Env,
+  PlaybackState,
+  ServerMessage,
+  SessionAttachment,
+} from "./types";
 
 type Meta = {
   playback: PlaybackState;
   roomId: string | null;
   bookId: string | null;
+  revision: number;
 };
 
+/**
+ * Hibernation-safe Durable Object.
+ * Never rely on an in-memory Map of sockets — after hibernation it is empty.
+ * Use state.getWebSockets() + serializeAttachment instead.
+ */
 export class ListeningRoom implements DurableObject {
   private state: DurableObjectState;
   private env: Env;
-  private sessions = new Map<WebSocket, Session>();
   private playback: PlaybackState = {
     position: 0,
     isPlaying: false,
@@ -22,6 +28,7 @@ export class ListeningRoom implements DurableObject {
   };
   private roomId: string | null = null;
   private bookId: string | null = null;
+  private revision = 0;
   private persistAlarmSet = false;
 
   constructor(state: DurableObjectState, env: Env) {
@@ -33,6 +40,7 @@ export class ListeningRoom implements DurableObject {
         this.playback = stored.playback;
         this.roomId = stored.roomId;
         this.bookId = stored.bookId ?? null;
+        this.revision = stored.revision ?? 0;
       }
     });
   }
@@ -40,7 +48,7 @@ export class ListeningRoom implements DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === "/hydrate" && request.method === "POST") {
+    if (url.pathname.endsWith("/hydrate") && request.method === "POST") {
       const body = (await request.json()) as {
         roomId: string;
         bookId?: string | null;
@@ -48,7 +56,8 @@ export class ListeningRoom implements DurableObject {
       };
       this.roomId = body.roomId;
       this.bookId = body.bookId ?? this.bookId;
-      if (!this.playback.isPlaying && this.sessions.size === 0) {
+      const sockets = this.state.getWebSockets();
+      if (!this.playback.isPlaying && sockets.length === 0) {
         this.playback.position = body.lastPosition || 0;
         this.playback.updatedAt = Date.now();
       } else if (this.playback.position === 0 && body.lastPosition) {
@@ -59,22 +68,32 @@ export class ListeningRoom implements DurableObject {
       return Response.json({ ok: true });
     }
 
-    if (request.headers.get("Upgrade") !== "websocket") {
+    const upgrade = request.headers.get("Upgrade");
+    if (!upgrade || upgrade.toLowerCase() !== "websocket") {
       return new Response("Expected WebSocket", { status: 426 });
     }
 
-    const name = url.searchParams.get("name")?.trim() || "Guest";
+    const name =
+      url.searchParams.get("name")?.trim().slice(0, 32) || "Guest";
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
+
     this.state.acceptWebSocket(server);
-    this.sessions.set(server, { name, quit: false });
-    this.send(server, this.statePayload(name));
-    this.broadcast(this.statePayload(null), server);
+    const attachment: SessionAttachment = { name };
+    server.serializeAttachment(attachment);
+
+    this.revision += 1;
+    await this.persistMeta();
+
+    // Tell everyone who is here + current playback.
+    this.broadcastAll();
+
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     if (typeof message !== "string") return;
+
     let data: ClientMessage;
     try {
       data = JSON.parse(message) as ClientMessage;
@@ -83,64 +102,67 @@ export class ListeningRoom implements DurableObject {
       return;
     }
 
-    const session = this.sessions.get(ws);
-    if (!session) return;
+    let attachment =
+      (ws.deserializeAttachment() as SessionAttachment | null) ?? {
+        name: "Guest",
+      };
 
     if (data.type === "join") {
-      session.name = data.name.trim().slice(0, 32) || "Guest";
-      this.broadcast(
-        {
-          type: "state",
-          position: this.livePosition(),
-          isPlaying: this.playback.isPlaying,
-          updatedAt: this.playback.updatedAt,
-          listeners: this.listeners(),
-          you: "",
-        },
-        ws,
-      );
-      this.send(ws, this.statePayload(session.name));
+      attachment = {
+        name: data.name.trim().slice(0, 32) || "Guest",
+      };
+      ws.serializeAttachment(attachment);
+      this.revision += 1;
+      await this.persistMeta();
+      this.broadcastAll();
+      return;
+    }
+
+    if (data.type === "heartbeat") {
+      // Keep-alive only — do not overwrite shared playback from followers.
       return;
     }
 
     if (
       data.type === "play" ||
       data.type === "pause" ||
-      data.type === "seek" ||
-      data.type === "heartbeat"
+      data.type === "seek"
     ) {
       const position = Math.max(0, Number(data.position) || 0);
       let isPlaying = this.playback.isPlaying;
       if (data.type === "play") isPlaying = true;
       if (data.type === "pause") isPlaying = false;
       if (data.type === "seek") isPlaying = Boolean(data.isPlaying);
-      if (data.type === "heartbeat") isPlaying = Boolean(data.isPlaying);
 
       this.playback = {
         position,
         isPlaying,
         updatedAt: Date.now(),
       };
+      this.revision += 1;
       await this.persistMeta();
       await this.schedulePersist();
 
-      if (data.type !== "heartbeat") {
-        this.broadcast(this.statePayload(null), ws);
-      }
+      // Broadcast to everyone including sender so clients share one timeline.
+      this.broadcastAll();
     }
   }
 
   async webSocketClose(ws: WebSocket) {
-    this.sessions.delete(ws);
-    this.broadcast(this.statePayload(null));
-    if (this.sessions.size === 0) {
+    this.revision += 1;
+    await this.persistMeta();
+    this.broadcastAll();
+    if (this.state.getWebSockets().length === 0) {
       await this.flushPositionToD1();
     }
   }
 
   async webSocketError(ws: WebSocket) {
-    this.sessions.delete(ws);
-    this.broadcast(this.statePayload(null));
+    try {
+      ws.close();
+    } catch {
+      // ignore
+    }
   }
 
   async alarm() {
@@ -149,15 +171,18 @@ export class ListeningRoom implements DurableObject {
   }
 
   private listeners(): string[] {
-    return [...this.sessions.values()]
-      .filter((s) => !s.quit)
-      .map((s) => s.name);
+    return this.state.getWebSockets().map((socket) => {
+      const attachment = socket.deserializeAttachment() as
+        | SessionAttachment
+        | null;
+      return attachment?.name?.trim() || "Guest";
+    });
   }
 
   private livePosition(): number {
     if (!this.playback.isPlaying) return this.playback.position;
     const elapsed = (Date.now() - this.playback.updatedAt) / 1000;
-    return this.playback.position + elapsed;
+    return this.playback.position + Math.max(0, elapsed);
   }
 
   private statePayload(you: string | null): ServerMessage {
@@ -166,6 +191,7 @@ export class ListeningRoom implements DurableObject {
       position: this.livePosition(),
       isPlaying: this.playback.isPlaying,
       updatedAt: this.playback.updatedAt,
+      revision: this.revision,
       listeners: this.listeners(),
       you: you ?? "",
     };
@@ -179,10 +205,11 @@ export class ListeningRoom implements DurableObject {
     }
   }
 
-  private broadcast(msg: ServerMessage, except?: WebSocket) {
-    for (const ws of this.sessions.keys()) {
-      if (except && ws === except) continue;
-      this.send(ws, msg);
+  private broadcastAll() {
+    for (const ws of this.state.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() as SessionAttachment | null;
+      const you = attachment?.name || "";
+      this.send(ws, this.statePayload(you));
     }
   }
 
@@ -191,6 +218,7 @@ export class ListeningRoom implements DurableObject {
       playback: this.playback,
       roomId: this.roomId,
       bookId: this.bookId,
+      revision: this.revision,
     } satisfies Meta);
   }
 

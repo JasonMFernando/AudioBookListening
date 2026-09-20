@@ -409,8 +409,10 @@ app.get("/api/rooms/:code/ws", async (c) => {
   });
 
   const name = new URL(c.req.url).searchParams.get("name") || "Guest";
-  const doUrl = new URL(`https://room/ws?name=${encodeURIComponent(name)}`);
-  return stub.fetch(doUrl, c.req.raw);
+  // Forward the original upgrade request so WebSocket headers stay intact.
+  const forwardUrl = new URL(c.req.url);
+  forwardUrl.searchParams.set("name", name);
+  return stub.fetch(new Request(forwardUrl.toString(), c.req.raw));
 });
 
 app.get("/api/rooms/:code/audio", async (c) => {

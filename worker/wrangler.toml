@@ -27,5 +27,5 @@ tag = "v1"
 new_sqlite_classes = ["ListeningRoom"]
 
 [vars]
-CORS_ORIGIN = "http://localhost:3000"
+CORS_ORIGIN = "https://audiobook-listening.vercel.app"
 LIBRARY_PREFIX = "AudioBooks/"

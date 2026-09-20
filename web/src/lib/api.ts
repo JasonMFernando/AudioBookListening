@@ -11,8 +11,15 @@ export function audioUrlForRoom(code: string) {
 }
 
 export function wsUrl(code: string, name: string) {
-  const base = WORKER_URL.replace(/^http/, "ws");
-  return `${base}/api/rooms/${encodeURIComponent(code)}/ws?name=${encodeURIComponent(name)}`;
+  const httpBase =
+    process.env.NEXT_PUBLIC_WORKER_URL?.replace(/\/$/, "") ||
+    "http://localhost:8787";
+  const wsBase = httpBase.startsWith("https://")
+    ? `wss://${httpBase.slice("https://".length)}`
+    : httpBase.startsWith("http://")
+      ? `ws://${httpBase.slice("http://".length)}`
+      : httpBase.replace(/^http/, "ws");
+  return `${wsBase}/api/rooms/${encodeURIComponent(code)}/ws?name=${encodeURIComponent(name)}`;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
