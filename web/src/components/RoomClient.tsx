@@ -86,6 +86,9 @@ export function RoomClient({ code }: Props) {
   if (!nameReady) {
     return (
       <main className="room-shell narrow">
+        <Link href="/" className="btn-ghost back-link">
+          ← Home
+        </Link>
         <p className="brand-mark">Listen Together</p>
         <h1>{room.title}</h1>
         <p className="lede">
@@ -130,6 +133,11 @@ export function RoomClient({ code }: Props) {
 
   return (
     <main className="room-shell">
+      <div className="top-nav">
+        <Link href="/" className="btn-ghost back-link">
+          ← Home
+        </Link>
+      </div>
       <header className="room-header">
         <div>
           <p className="brand-mark">Listen Together</p>
